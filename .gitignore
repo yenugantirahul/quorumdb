@@ -1,0 +1,44 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build files
+*.test
+*.out
+
+# Air
+tmp/
+build/
+
+# Coverage
+coverage.out
+
+# Environment variables
+.env
+
+# Logs
+*.log
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# BadgerDB
+badger/
+data/
+# Database files
+datanode*/
+*.vlog
+*.sst
+*.manifest
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,30 @@
+version: "3"
+
+vars:
+  GREETING: Hello, world!
+
+tasks:
+  run-node1:
+    cmd: go run cmd/node/main.go node1 8080
+
+  run-node2:
+    cmd: go run cmd/node/main.go node2 8081
+
+  run-node3:
+    cmd: go run cmd/node/main.go node3 8082
+
+  run-node4:
+    cmd: go run cmd/node/main.go node4 8083
+
+  run-node5:
+    cmd: go run cmd/node/main.go node5 8084
+
+  # Main command to boot all 5 nodes at once
+  run:
+    desc: Start all 5 distributed nodes concurrently
+    deps:
+      - run-node1
+      - run-node2
+      - run-node3
+      - run-node4
+      - run-node5
