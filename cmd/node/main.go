@@ -55,6 +55,7 @@ func main() {
 	// Register routes
 	http.HandleFunc("/health/", handler.Health)
 	http.HandleFunc("/key/", handler.HandleKey)
+	http.HandleFunc("/replica/", handler.HandleReplica)
 
 	log.Println("Server running on :" + self.PORT)
 	hashvalue := ring.GetNode("user1")

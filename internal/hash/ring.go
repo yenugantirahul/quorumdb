@@ -40,13 +40,15 @@ func (h *HashRing) AddNode(node cluster.Node) {
 	})
 }
 
-func (h *HashRing) GetNode(key string) cluster.Node {
-
+func (h *HashRing) GetNode(key string) []cluster.Node {
+	nodes := make([]cluster.Node, 0, 3)
 	hashedValue := h.hash(key)
 	for _, val := range h.sortedHashes {
-		if val >= hashedValue {
-			return h.nodeHashes[val]
+		if val >= hashedValue && len(nodes) < 3 {
+			nodes = append(nodes, h.nodeHashes[val])
+		} else if len(nodes) == 3 {
+			break
 		}
 	}
-	return h.nodeHashes[h.sortedHashes[0]]
+	return nodes
 }
