@@ -14,9 +14,7 @@ import (
 	"github.com/yenuganti/quorumdb/internal/storage"
 )
 
-// Handler Struct contains store, pointer
-//
-//	to hash-ring and the current nodes data as self
+// Handler holds the store, consistent hash ring, and this node's identity.
 type Handler struct {
 	store storage.Store
 	ring  *hash.HashRing
@@ -35,214 +33,261 @@ func NewHandler(
 	}
 }
 
-// This function handles the reuqests
+// HandleKey routes GET / PUT / DELETE requests to the correct node or handles
+// them locally if this node is the primary owner of the key.
 func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
-	// Defines the type of method as GET, PUT, PATCH, DELETE
-	requestMethod := r.Method
-
-	key := strings.TrimPrefix(
-		r.URL.Path,
-		"/key/",
-	)
-
-	// Hashes the current key which tells in which node the data should be stored
-	owner := h.ring.GetNode(key)
-
-	if owner[0].ID == h.self.ID {
-		fmt.Fprintln(w, "Request received with method: "+requestMethod)
-
-		switch r.Method {
-		case "GET":
-			res, err := h.store.Get(key)
-			if err != nil {
-				fmt.Fprintln(w, "Value Doesn't exist")
-				return
-			}
-			fmt.Fprintln(w, res)
-		case "PUT":
-			var req model.PutRequest
-
-			bodyBytes, err := io.ReadAll(r.Body)
-
-			if err != nil {
-				fmt.Fprintln(w, "Error occured")
-				return
-			}
-			// Insert to owner node
-			h.store.Put(key, req.Value)
-			json.Unmarshal(bodyBytes, &req)
-
-			// Replica 1
-
-			rport1 := owner[1].PORT
-
-			url := fmt.Sprintf(
-				"http://localhost:%s/replica/%s",
-				rport1,
-				key,
-			)
-
-			replicaReq1, err := http.NewRequest(
-				r.Method,
-				url,
-				bytes.NewReader(bodyBytes),
-			)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-
-			// Copy Headers
-			replicaReq1.Header = r.Header.Clone()
-			// Send request
-			repRes1, err := http.DefaultClient.Do(replicaReq1)
-			if err != nil {
-				http.Error(w, "Failed to replicate data", http.StatusBadGateway)
-				return
-			}
-			// Close request
-			defer repRes1.Body.Close()
-			body, err := io.ReadAll(repRes1.Body)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			fmt.Fprintln(w, string(body))
-
-			// Replica 2r
-			rport2 := owner[2].PORT
-
-			url1 := fmt.Sprintf(
-				"http://localhost:%s/replica/%s",
-				rport2,
-				key,
-			)
-
-			replicaReq2, err := http.NewRequest(
-				r.Method,
-				url1,
-				bytes.NewReader(bodyBytes),
-			)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			// Copy Headers
-			replicaReq2.Header = r.Header.Clone()
-			// Send request 2
-			repRes2, err := http.DefaultClient.Do(replicaReq2)
-			if err != nil {
-				http.Error(w, "Failed to replicate data", http.StatusBadGateway)
-				return
-			}
-			// Close request
-			defer repRes2.Body.Close()
-			body1, err := io.ReadAll(repRes2.Body)
-			if err != nil {
-				fmt.Println(err)
-				return
-			}
-
-			fmt.Fprintln(w, string(body1))
-			fmt.Fprintln(w, "Inserted data")
-		case "DELETE":
-			h.store.Delete(key)
-			fmt.Fprintln(w, "Deleted Key")
-		}
-
-	} else {
-		port := owner[0].PORT
-
-		url := fmt.Sprintf(
-			"http://localhost:%s/key/%s",
-			port,
-			key,
-		)
-
-		req, err := http.NewRequest(
-			r.Method,
-			url,
-			r.Body,
-		)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		req.Header = r.Header.Clone()
-
-		res, err := http.DefaultClient.Do(req)
-		if err != nil {
-			http.Error(w, "Failed to forward request", http.StatusBadGateway)
-			return
-		}
-		defer res.Body.Close()
-
-		body, err := io.ReadAll(res.Body)
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		fmt.Fprintln(w, string(body))
-	}
-}
-
-func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
-
-	key := strings.TrimPrefix(
-		r.URL.Path,
-		"/replica/",
-	)
-
-	var req model.PutRequest
-
-	err := json.NewDecoder(r.Body).Decode(&req)
-
-	if err != nil {
-		fmt.Fprintln(w, "Error occured")
+	key := strings.TrimPrefix(r.URL.Path, "/key/")
+	if key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
 
-	h.store.Put(key, req.Value)
-	fmt.Fprintln(w, "Inserted data")
+	owner := h.ring.GetNode(key)
 
+	// FIX 1: forward first, then handle locally — avoids the duplicate
+	// inline forwarding block that existed in the original code.
+	if owner[0].ID != h.self.ID {
+		h.forwardRequest(owner[0], key, w, r)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+
+		h.handleGet(w, key, owner)
+
+	case http.MethodPut:
+
+		h.handlePut(w, r, key, owner)
+
+	case http.MethodDelete:
+		h.handleDelete(w, key)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+func (h *Handler) handleGet(
+	w http.ResponseWriter,
+	key string,
+	owner []cluster.Node,
+) {
+	readCount := 0
+	value := ""
+
+	for _, node := range owner {
+		var (
+			val string
+			err error
+		)
+
+		if node.ID == h.self.ID {
+			val, err = h.store.Get(key)
+		} else {
+			val, err = h.readFromReplica(node, key)
+		}
+
+		if err == nil {
+			readCount++
+
+			// Keep the first successful value
+			if value == "" {
+				value = val
+			}
+		}
+
+		// Read quorum achieved
+		if readCount >= 2 {
+			break
+		}
+	}
+
+	if readCount < 2 {
+		http.Error(
+			w,
+			"read quorum not achieved",
+			http.StatusServiceUnavailable,
+		)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, value)
 }
 
-func (h *Handler) forwardRequest(owner cluster.Node, key string, w http.ResponseWriter, r *http.Request) {
-	port := owner.PORT
+func (h *Handler) readFromReplica(
+	node cluster.Node,
+	key string,
+) (string, error) {
 
 	url := fmt.Sprintf(
-		"http://localhost:%s/key/%s",
-		port,
+		"http://localhost:%s/replica/%s",
+		node.PORT,
 		key,
 	)
 
-	req, err := http.NewRequest(
-		r.Method,
-		url,
-		r.Body,
-	)
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("read failed")
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(body)), nil
+}
+
+func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, owner []cluster.Node) {
+	// Read body once so we can both decode and forward it to replicas.
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read request body", http.StatusBadRequest)
+		return
+	}
+
+	var req model.PutRequest
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// json.Unmarshal silently left req.Value as "".
+	if req.Value == "" {
+		http.Error(w, `"value" field is required and must not be empty`, http.StatusBadRequest)
+		return
+	}
+
+	if err := h.store.Put(key, req.Value); err != nil {
+		http.Error(w, "failed to store value", http.StatusInternalServerError)
+		return
+	}
+
+	// Replicate to every replica node (owner[1:]).
+	ack := 1
+	for _, replica := range owner[1:] {
+		if err := h.replicateTo(replica, key, bodyBytes); err != nil {
+			// Log and continue — partial replication is better than failing the write.
+			fmt.Printf("replication failed to %s: %v\n", replica.ID, err)
+		} else {
+			ack++
+			fmt.Printf("replicated to %s\n", replica.ID)
+		}
+	}
+
+	if ack < 2 {
+		fmt.Fprintln(w, "Replication Failed")
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintln(w, "ok")
+
+}
+
+func (h *Handler) handleDelete(w http.ResponseWriter, key string) {
+	if err := h.store.Delete(key); err != nil {
+		http.Error(w, fmt.Sprintf("key not found: %s", key), http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintln(w, "deleted")
+}
+
+// returns a real error instead of just printing.
+func (h *Handler) replicateTo(replica cluster.Node, key string, body []byte) error {
+	url := fmt.Sprintf("http://localhost:%s/replica/%s", replica.PORT, key)
+
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build replica request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send replica request: %w", err)
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("replica %s returned status %d", replica.ID, res.StatusCode)
+	}
+	return nil
+}
+
+// HandleReplica accepts PUT requests from the primary and writes them locally.
+// It does NOT re-replicate — only the primary drives replication.
+func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
+
+	key := strings.TrimPrefix(r.URL.Path, "/replica/")
+	if key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+
+		var req model.PutRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON body", http.StatusBadRequest)
+			return
+		}
+
+		if req.Value == "" {
+			http.Error(w, `"value" field is required and must not be empty`, http.StatusBadRequest)
+			return
+		}
+
+		if err := h.store.Put(key, req.Value); err != nil {
+			http.Error(w, "failed to store value", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "ok")
+	case http.MethodGet:
+		val, err := h.store.Get(key)
+		if err != nil {
+			http.Error(w, "failed to store value", http.StatusInternalServerError)
+			return
+		} else {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintln(w, val)
+		}
+	}
+}
+
+// status code and (b) appended an extra newline. io.Copy is correct here.
+func (h *Handler) forwardRequest(owner cluster.Node, key string, w http.ResponseWriter, r *http.Request) {
+	url := fmt.Sprintf("http://localhost:%s/key/%s", owner.PORT, key)
+
+	req, err := http.NewRequest(r.Method, url, r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
 	req.Header = r.Header.Clone()
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		http.Error(w, "Failed to forward request", http.StatusBadGateway)
+		http.Error(w, "failed to forward request", http.StatusBadGateway)
 		return
 	}
 	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		fmt.Println(err)
-		return
+	// Propagate headers and status from the upstream node.
+	for k, vals := range res.Header {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
 	}
-
-	fmt.Fprintln(w, string(body))
+	w.WriteHeader(res.StatusCode)
+	io.Copy(w, res.Body) //nolint:errcheck
 }
