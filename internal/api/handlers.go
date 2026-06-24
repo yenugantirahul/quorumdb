@@ -46,10 +46,6 @@ func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
 
 	// FIX 1: forward first, then handle locally — avoids the duplicate
 	// inline forwarding block that existed in the original code.
-	if owner[0].ID != h.self.ID {
-		h.forwardRequest(owner[0], key, w, r)
-		return
-	}
 
 	switch r.Method {
 	case http.MethodGet:
@@ -57,6 +53,10 @@ func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
 		h.handleGet(w, key, owner)
 
 	case http.MethodPut:
+		if owner[0].ID != h.self.ID {
+			h.forwardRequest(owner[0], key, w, r)
+			return
+		}
 
 		h.handlePut(w, r, key, owner)
 
