@@ -1,7 +1,7 @@
 package cluster
 
 type Node struct {
-	ID      string
-	Address string
-	PORT    string
+	ID    string
+	PORT  string
+	Alive bool
 }

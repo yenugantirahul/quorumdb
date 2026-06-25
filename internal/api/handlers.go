@@ -16,20 +16,23 @@ import (
 
 // Handler holds the store, consistent hash ring, and this node's identity.
 type Handler struct {
-	store storage.Store
-	ring  *hash.HashRing
-	self  cluster.Node
+	store   storage.Store
+	ring    *hash.HashRing
+	self    cluster.Node
+	manager cluster.Manager
 }
 
 func NewHandler(
 	store storage.Store,
 	ring *hash.HashRing,
 	self cluster.Node,
+	manager *cluster.Manager,
 ) *Handler {
 	return &Handler{
-		store: store,
-		ring:  ring,
-		self:  self,
+		store:   store,
+		ring:    ring,
+		self:    self,
+		manager: *manager,
 	}
 }
 
@@ -172,12 +175,15 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 	// Replicate to every replica node (owner[1:]).
 	ack := 1
 	for _, replica := range owner[1:] {
-		if err := h.replicateTo(replica, key, bodyBytes); err != nil {
-			// Log and continue — partial replication is better than failing the write.
-			fmt.Printf("replication failed to %s: %v\n", replica.ID, err)
-		} else {
-			ack++
-			fmt.Printf("replicated to %s\n", replica.ID)
+		if h.manager.IsAlive(replica.ID) {
+
+			if err := h.replicateTo(replica, key, bodyBytes); err != nil {
+				// Log and continue — partial replication is better than failing the write.
+				fmt.Printf("replication failed to %s: %v\n", replica.ID, err)
+			} else {
+				ack++
+				fmt.Printf("replicated to %s\n", replica.ID)
+			}
 		}
 	}
 

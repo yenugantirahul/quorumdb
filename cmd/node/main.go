@@ -13,57 +13,82 @@ import (
 
 func main() {
 
-	// port := os.Getenv("PORT")
+	if len(os.Args) < 3 {
+		log.Fatal("Usage: go run main.go <nodeID> <port>")
+	}
 
 	nodeID := os.Args[1]
-	// Create storage engine
-	store, err := storage.NewBadgerStore("./data" + nodeID)
+	port := os.Args[2]
 
-	portStr := os.Args[2]
 	self := cluster.Node{
-		ID:      nodeID,
-		Address: "localhost",
-		PORT:    portStr,
+		ID:    nodeID,
+		PORT:  port,
+		Alive: true,
 	}
 
-	ring := hash.NewHashRing()
-
-	node1 := cluster.Node{
-		ID:   "node1",
-		PORT: "8080",
-	}
-	node2 := cluster.Node{
-		ID:   "node2",
-		PORT: "8081",
-	}
-	node3 := cluster.Node{
-		ID:   "node3",
-		PORT: "8082",
-	}
-
-	ring.AddNode(node1)
-	ring.AddNode(node2)
-	ring.AddNode(node3)
-
+	store, err := storage.NewBadgerStore("./data/" + nodeID)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Create handler and inject storage
-	handler := api.NewHandler(store, ring, self)
+	manager := cluster.NewManager()
 
-	// Register routes
-	http.HandleFunc("/health/", handler.Health)
+	// Add nodes to the manager
+
+	manager.AddNode(cluster.Node{
+		ID:    "node1",
+		PORT:  "8080",
+		Alive: true,
+	})
+
+	manager.AddNode(cluster.Node{
+		ID:    "node2",
+		PORT:  "8081",
+		Alive: true,
+	})
+
+	manager.AddNode(cluster.Node{
+		ID:    "node3",
+		PORT:  "8082",
+		Alive: true,
+	})
+
+	ring := hash.NewHashRing()
+
+	// Add nodes to hashring
+
+	for _, node := range manager.GetAllNodes() {
+		ring.AddNode(node)
+	}
+
+	handler := api.NewHandler(
+		store,
+		ring,
+		self,
+		manager,
+	)
+
+	healthManager := cluster.NewHealthManager(
+		manager,
+		self,
+	)
+
+	// Start the health checker
+
+	healthManager.Start()
+
+	// Routes
+	http.HandleFunc("/health", handler.HandleHealth)
 	http.HandleFunc("/key/", handler.HandleKey)
 	http.HandleFunc("/replica/", handler.HandleReplica)
 
-	log.Println("Server running on :" + self.PORT)
-	hashvalue := ring.GetNode("user1")
-	log.Println(hashvalue)
+	log.Println("Node:", self.ID)
+	log.Println("Port:", self.PORT)
 
-	// Start server
+	// ----------------------------
+	// Start Server
+	// ----------------------------
 	err = http.ListenAndServe(":"+self.PORT, nil)
-
 	if err != nil {
 		log.Fatal(err)
 	}
