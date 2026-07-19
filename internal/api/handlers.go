@@ -47,14 +47,15 @@ func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
 
 	owner := h.ring.GetNode(key)
 
-	// FIX 1: forward first, then handle locally — avoids the duplicate
+	// Forward first, then handle locally — avoids the duplicate
 	// inline forwarding block that existed in the original code.
 
 	switch r.Method {
+	// GET Method
 	case http.MethodGet:
 
 		h.handleGet(w, key, owner)
-
+		// PUT Method
 	case http.MethodPut:
 		if owner[0].ID != h.self.ID {
 			h.forwardRequest(owner[0], key, w, r)

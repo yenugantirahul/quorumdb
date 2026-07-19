@@ -35,31 +35,13 @@ func main() {
 
 	// Add nodes to the manager
 
-	manager.AddNode(cluster.Node{
-		ID:    "node1",
-		PORT:  "8080",
-		Alive: true,
-	})
-
-	manager.AddNode(cluster.Node{
-		ID:    "node2",
-		PORT:  "8081",
-		Alive: true,
-	})
-
-	manager.AddNode(cluster.Node{
-		ID:    "node3",
-		PORT:  "8082",
-		Alive: true,
-	})
+	manager.AddNode(self)
 
 	ring := hash.NewHashRing()
 
 	// Add nodes to hashring
 
-	for _, node := range manager.GetAllNodes() {
-		ring.AddNode(node)
-	}
+	ring.AddNode(self)
 
 	handler := api.NewHandler(
 		store,
