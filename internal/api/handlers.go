@@ -66,11 +66,13 @@ func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
 		h.handlePut(w, r, key, owner)
 
 	case http.MethodDelete:
-		h.handleDelete(w, key)
+		h.handleDelete(w, key, owner)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
+
+// Gets the value for the key
 func (h *Handler) handleGet(
 	w http.ResponseWriter,
 	key string,
@@ -79,32 +81,36 @@ func (h *Handler) handleGet(
 	readCount := 0
 	value := ""
 
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	for _, node := range owner {
-		var (
-			val string
-			err error
-		)
+		wg.Add(1)
+		go func(node cluster.Node) {
+			defer wg.Done()
+			var (
+				val string
+				err error
+			)
 
-		if node.ID == h.self.ID {
-			val, err = h.store.Get(key)
-		} else {
-			val, err = h.readFromReplica(node, key)
-		}
-
-		if err == nil {
-			readCount++
-
-			// Keep the first successful value
-			if value == "" {
-				value = val
+			if node.ID == h.self.ID {
+				val, err = h.store.Get(key)
+			} else {
+				val, err = h.readFromReplica(node, key)
 			}
-		}
+			mu.Lock()
+			if err == nil {
+				readCount++
 
-		// Read quorum achieved
-		if readCount >= 2 {
-			break
-		}
+				// Keep the first successful value
+				if value == "" {
+					value = val
+				}
+			}
+			mu.Unlock()
+		}(node)
 	}
+	wg.Wait()
+	// Read quorum achieved
 
 	if readCount < 2 {
 		http.Error(
@@ -119,6 +125,7 @@ func (h *Handler) handleGet(
 	fmt.Fprintln(w, value)
 }
 
+// Reads From Replicas
 func (h *Handler) readFromReplica(
 	node cluster.Node,
 	key string,
@@ -148,6 +155,7 @@ func (h *Handler) readFromReplica(
 	return strings.TrimSpace(string(body)), nil
 }
 
+// This function handles PUT request
 func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, owner []cluster.Node) {
 	// Read body once so we can  decode and forward it to replicas.
 
@@ -217,13 +225,83 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 
 }
 
-func (h *Handler) handleDelete(w http.ResponseWriter, key string) {
+// Deletes from replicas
+
+func (h *Handler) replicateDelete(node cluster.Node, key string) error {
+	url := fmt.Sprintf(
+		"http://localhost:%s/replica/%s",
+		node.PORT,
+		key,
+	)
+
+	req, err := http.NewRequest(
+		http.MethodDelete,
+		url,
+		nil,
+	)
+	if err != nil {
+		return err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("replica returned %d", res.StatusCode)
+	}
+
+	return nil
+}
+
+func (h *Handler) handleDelete(w http.ResponseWriter,
+	key string,
+	owner []cluster.Node) {
 	if err := h.store.Delete(key); err != nil {
 		http.Error(w, fmt.Sprintf("key not found: %s", key), http.StatusNotFound)
 		return
 	}
+	ack := 1 // Primary already acknowledged the write.
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, replica := range owner[1:] {
+
+		if !h.manager.IsAlive(replica.ID) {
+			continue
+		}
+
+		wg.Add(1)
+
+		go func(replica cluster.Node) {
+			defer wg.Done()
+
+			if err := h.replicateDelete(replica, key); err != nil {
+				fmt.Printf("Deletion failed to %s: %v\n", replica.ID, err)
+				return
+			}
+
+			mu.Lock()
+			ack++
+			mu.Unlock()
+
+			fmt.Printf("Deleted from  %s\n", replica.ID)
+
+		}(replica)
+	}
+
+	wg.Wait()
+
+	if ack < 2 {
+		http.Error(w, "write quorum not achieved", http.StatusServiceUnavailable)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, "deleted")
+	fmt.Fprintln(w, "Deleted")
+
 }
 
 // returns a real error instead of just printing.
@@ -288,6 +366,15 @@ func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintln(w, val)
 		}
+	case http.MethodDelete:
+
+		if err := h.store.Delete(key); err != nil {
+			http.Error(w, "key not found", http.StatusNotFound)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "deleted")
 	}
 }
 
