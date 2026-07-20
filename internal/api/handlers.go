@@ -20,8 +20,13 @@ type Handler struct {
 	store   storage.Store
 	ring    *hash.HashRing
 	self    cluster.Node
-	manager cluster.Manager
+	manager *cluster.Manager
 }
+
+const (
+	ReadQuorum  = 2
+	WriteQuorum = 2
+)
 
 func NewHandler(
 	store storage.Store,
@@ -33,7 +38,7 @@ func NewHandler(
 		store:   store,
 		ring:    ring,
 		self:    self,
-		manager: *manager,
+		manager: manager,
 	}
 }
 
@@ -66,6 +71,10 @@ func (h *Handler) HandleKey(w http.ResponseWriter, r *http.Request) {
 		h.handlePut(w, r, key, owner)
 
 	case http.MethodDelete:
+		if owner[0].ID != h.self.ID {
+			h.forwardRequest(owner[0], key, w, r)
+			return
+		}
 		h.handleDelete(w, key, owner)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -84,6 +93,9 @@ func (h *Handler) handleGet(
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, node := range owner {
+		if node.ID != h.self.ID && !h.manager.IsAlive(node.ID) {
+			continue
+		}
 		wg.Add(1)
 		go func(node cluster.Node) {
 			defer wg.Done()
@@ -215,7 +227,7 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 
 	wg.Wait()
 
-	if ack < 2 {
+	if ack < WriteQuorum {
 		http.Error(w, "write quorum not achieved", http.StatusServiceUnavailable)
 		return
 	}
@@ -294,7 +306,7 @@ func (h *Handler) handleDelete(w http.ResponseWriter,
 
 	wg.Wait()
 
-	if ack < 2 {
+	if ack < WriteQuorum {
 		http.Error(w, "write quorum not achieved", http.StatusServiceUnavailable)
 		return
 	}
