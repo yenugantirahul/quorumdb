@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/yenuganti/quorumdb/internal/cluster"
 	"github.com/yenuganti/quorumdb/internal/hash"
@@ -148,7 +149,7 @@ func (h *Handler) readFromReplica(
 }
 
 func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, owner []cluster.Node) {
-	// Read body once so we can both decode and forward it to replicas.
+	// Read body once so we can  decode and forward it to replicas.
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -174,24 +175,43 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 	}
 
 	// Replicate to every replica node (owner[1:]).
-	ack := 1
+	ack := 1 // Primary already acknowledged the write.
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for _, replica := range owner[1:] {
-		if h.manager.IsAlive(replica.ID) {
+
+		if !h.manager.IsAlive(replica.ID) {
+			continue
+		}
+
+		wg.Add(1)
+
+		go func(replica cluster.Node) {
+			defer wg.Done()
 
 			if err := h.replicateTo(replica, key, bodyBytes); err != nil {
-				// Log and continue — partial replication is better than failing the write.
 				fmt.Printf("replication failed to %s: %v\n", replica.ID, err)
-			} else {
-				ack++
-				fmt.Printf("replicated to %s\n", replica.ID)
+				return
 			}
-		}
+
+			mu.Lock()
+			ack++
+			mu.Unlock()
+
+			fmt.Printf("replicated to %s\n", replica.ID)
+
+		}(replica)
 	}
 
+	wg.Wait()
+
 	if ack < 2 {
-		fmt.Fprintln(w, "Replication Failed")
+		http.Error(w, "write quorum not achieved", http.StatusServiceUnavailable)
 		return
 	}
+
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprintln(w, "ok")
 
