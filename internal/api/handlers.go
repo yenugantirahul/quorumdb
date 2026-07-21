@@ -197,9 +197,10 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 	}
 	record := model.Record{
 		Value:   req.Value,
-		Version: h.version.Next(), // Temporary
+		Version: h.version.Next(),
 	}
-
+	req.Version = record.Version
+	bodyBytes, _ = json.Marshal(req)
 	if err := h.store.Put(key, record); err != nil {
 		http.Error(w, "failed to store value", http.StatusInternalServerError)
 		return
@@ -375,7 +376,7 @@ func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
 
 		record := model.Record{
 			Value:   req.Value,
-			Version: h.version.Next(), // Temporary
+			Version: req.Version, // Temporary
 		}
 
 		if err := h.store.Put(key, record); err != nil {

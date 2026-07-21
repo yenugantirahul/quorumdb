@@ -1,7 +1,8 @@
 package model
 
 type PutRequest struct {
-	Value string `json:"value"`
+	Value   string `json:"value"`
+	Version uint64 `json:"version,omitempty"`
 }
 
 type Record struct {
