@@ -1,7 +1,10 @@
 package storage
 
 import (
+	"encoding/json"
+
 	"github.com/dgraph-io/badger/v4"
+	"github.com/yenuganti/quorumdb/internal/model"
 )
 
 type BadgerStore struct {
@@ -22,16 +25,19 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 }
 
 // SET the key -> Value in the Disk
-func (b *BadgerStore) Put(key string, value string) error {
+func (b *BadgerStore) Put(key string, record model.Record) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
 	return b.db.Update(func(txn *badger.Txn) error {
-		return txn.Set([]byte(key), []byte(value))
+		return txn.Set([]byte(key), []byte(data))
 	})
 }
 
 // Gets the Key - Value from the Disk
-
-func (b *BadgerStore) Get(key string) (string, error) {
-	var result string
+func (b *BadgerStore) Get(key string) (model.Record, error) {
+	var record model.Record
 
 	err := b.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get([]byte(key))
@@ -40,12 +46,11 @@ func (b *BadgerStore) Get(key string) (string, error) {
 		}
 
 		return item.Value(func(val []byte) error {
-			result = string(val)
-			return nil
+			return json.Unmarshal(val, &record)
 		})
 	})
 
-	return result, err
+	return record, err
 }
 
 // Deletes the key-value pair stored on the disk

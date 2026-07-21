@@ -13,6 +13,7 @@ import (
 	"github.com/yenuganti/quorumdb/internal/hash"
 	"github.com/yenuganti/quorumdb/internal/model"
 	"github.com/yenuganti/quorumdb/internal/storage"
+	"github.com/yenuganti/quorumdb/internal/version"
 )
 
 // Handler holds the store, consistent hash ring, and this node's identity.
@@ -21,6 +22,7 @@ type Handler struct {
 	ring    *hash.HashRing
 	self    cluster.Node
 	manager *cluster.Manager
+	version *version.Manager
 }
 
 const (
@@ -33,12 +35,15 @@ func NewHandler(
 	ring *hash.HashRing,
 	self cluster.Node,
 	manager *cluster.Manager,
+	version *version.Manager,
+
 ) *Handler {
 	return &Handler{
 		store:   store,
 		ring:    ring,
 		self:    self,
 		manager: manager,
+		version: version,
 	}
 }
 
@@ -87,8 +92,9 @@ func (h *Handler) handleGet(
 	key string,
 	owner []cluster.Node,
 ) {
+
 	readCount := 0
-	value := ""
+	var value model.Record
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -100,22 +106,22 @@ func (h *Handler) handleGet(
 		go func(node cluster.Node) {
 			defer wg.Done()
 			var (
-				val string
-				err error
+				record model.Record
+				err    error
 			)
 
 			if node.ID == h.self.ID {
-				val, err = h.store.Get(key)
+				record, err = h.store.Get(key)
 			} else {
-				val, err = h.readFromReplica(node, key)
+				record, err = h.readFromReplica(node, key)
 			}
 			mu.Lock()
 			if err == nil {
 				readCount++
 
 				// Keep the first successful value
-				if value == "" {
-					value = val
+				if record.Version > value.Version {
+					value = record
 				}
 			}
 			mu.Unlock()
@@ -134,14 +140,14 @@ func (h *Handler) handleGet(
 	}
 
 	w.WriteHeader(http.StatusOK)
-	fmt.Fprintln(w, value)
+	fmt.Fprintln(w, value.Value)
 }
 
 // Reads From Replicas
 func (h *Handler) readFromReplica(
 	node cluster.Node,
 	key string,
-) (string, error) {
+) (model.Record, error) {
 
 	url := fmt.Sprintf(
 		"http://localhost:%s/replica/%s",
@@ -151,20 +157,21 @@ func (h *Handler) readFromReplica(
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", err
+		return model.Record{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("read failed")
+		return model.Record{}, fmt.Errorf("read failed")
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
+	var record model.Record
+
+	if err := json.NewDecoder(resp.Body).Decode(&record); err != nil {
+		return model.Record{}, err
 	}
 
-	return strings.TrimSpace(string(body)), nil
+	return record, nil
 }
 
 // This function handles PUT request
@@ -188,8 +195,12 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 		http.Error(w, `"value" field is required and must not be empty`, http.StatusBadRequest)
 		return
 	}
+	record := model.Record{
+		Value:   req.Value,
+		Version: h.version.Next(), // Temporary
+	}
 
-	if err := h.store.Put(key, req.Value); err != nil {
+	if err := h.store.Put(key, record); err != nil {
 		http.Error(w, "failed to store value", http.StatusInternalServerError)
 		return
 	}
@@ -362,7 +373,12 @@ func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.store.Put(key, req.Value); err != nil {
+		record := model.Record{
+			Value:   req.Value,
+			Version: h.version.Next(), // Temporary
+		}
+
+		if err := h.store.Put(key, record); err != nil {
 			http.Error(w, "failed to store value", http.StatusInternalServerError)
 			return
 		}
@@ -370,13 +386,18 @@ func (h *Handler) HandleReplica(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
 	case http.MethodGet:
-		val, err := h.store.Get(key)
+		record, err := h.store.Get(key)
 		if err != nil {
-			http.Error(w, "failed to store value", http.StatusInternalServerError)
+			http.Error(w, "failed to get value", http.StatusInternalServerError)
 			return
-		} else {
-			w.WriteHeader(http.StatusOK)
-			fmt.Fprintln(w, val)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+
+		if err := json.NewEncoder(w).Encode(record); err != nil {
+			http.Error(w, "failed to encode response", http.StatusInternalServerError)
+			return
 		}
 	case http.MethodDelete:
 

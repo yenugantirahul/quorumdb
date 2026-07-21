@@ -9,6 +9,7 @@ import (
 	"github.com/yenuganti/quorumdb/internal/cluster"
 	"github.com/yenuganti/quorumdb/internal/hash"
 	"github.com/yenuganti/quorumdb/internal/storage"
+	"github.com/yenuganti/quorumdb/internal/version"
 )
 
 func main() {
@@ -32,6 +33,7 @@ func main() {
 	}
 
 	manager := cluster.NewManager()
+	versionManager := version.NewManager()
 
 	// Add nodes to the manager
 
@@ -48,6 +50,7 @@ func main() {
 		ring,
 		self,
 		manager,
+		versionManager,
 	)
 
 	healthManager := cluster.NewHealthManager(

@@ -1,7 +1,9 @@
 package storage
 
+import "github.com/yenuganti/quorumdb/internal/model"
+
 type Store interface {
-	Put(key, value string) error
-	Get(key string) (string, error)
+	Put(key string, record model.Record) error
+	Get(key string) (model.Record, error)
 	Delete(key string) error
 }
