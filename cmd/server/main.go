@@ -13,37 +13,54 @@ import (
 )
 
 func main() {
-
 	if len(os.Args) < 3 {
-		log.Fatal("Usage: go run main.go <nodeID> <port>")
+		log.Fatal("Usage: go run ./cmd/server <nodeID> <port>")
 	}
 
 	nodeID := os.Args[1]
 	port := os.Args[2]
 
+	// This represents the current process.
 	self := cluster.Node{
 		ID:    nodeID,
 		PORT:  port,
 		Alive: true,
 	}
 
+	// Every process knows about the complete cluster.
+	nodes := []cluster.Node{
+		{
+			ID:    "node1",
+			PORT:  "8080",
+			Alive: true,
+		},
+		{
+			ID:    "node2",
+			PORT:  "8081",
+			Alive: true,
+		},
+		{
+			ID:    "node3",
+			PORT:  "8082",
+			Alive: true,
+		},
+	}
+
+	// Each node gets its own BadgerDB directory.
 	store, err := storage.NewBadgerStore("./data/" + nodeID)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	manager := cluster.NewManager()
+	ring := hash.NewHashRing()
 	versionManager := version.NewManager()
 
-	// Add nodes to the manager
-
-	manager.AddNode(self)
-
-	ring := hash.NewHashRing()
-
-	// Add nodes to hashring
-
-	ring.AddNode(self)
+	// Add every cluster node to the manager and hash ring.
+	for _, node := range nodes {
+		manager.AddNode(node)
+		ring.AddNode(node)
+	}
 
 	handler := api.NewHandler(
 		store,
@@ -58,21 +75,20 @@ func main() {
 		self,
 	)
 
-	// Start the health checker
-
 	healthManager.Start()
 
-	// Routes
 	http.HandleFunc("/health", handler.HandleHealth)
 	http.HandleFunc("/key/", handler.HandleKey)
 	http.HandleFunc("/replica/", handler.HandleReplica)
 
-	log.Println("Node:", self.ID)
-	log.Println("Port:", self.PORT)
+	log.Println("Current node:", self.ID)
+	log.Println("Current port:", self.PORT)
 
-	// ----------------------------
-	// Start Server
-	// ----------------------------
+	log.Println("Known cluster nodes:")
+	for _, node := range nodes {
+		log.Printf("- %s running on port %s\n", node.ID, node.PORT)
+	}
+
 	err = http.ListenAndServe(":"+self.PORT, nil)
 	if err != nil {
 		log.Fatal(err)

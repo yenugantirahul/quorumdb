@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -95,7 +96,7 @@ func (h *Handler) handleGet(
 
 	readCount := 0
 	var value model.Record
-
+	var responses []model.ReplicaResponse
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, node := range owner {
@@ -118,6 +119,10 @@ func (h *Handler) handleGet(
 			mu.Lock()
 			if err == nil {
 				readCount++
+				responses = append(responses, model.ReplicaResponse{
+					Node:   node,
+					Record: record,
+				})
 
 				// Keep the first successful value
 				if record.Version > value.Version {
@@ -129,6 +134,12 @@ func (h *Handler) handleGet(
 	}
 	wg.Wait()
 	// Read quorum achieved
+
+	for _, replica := range responses {
+		if replica.Record.Version < value.Version {
+			h.repairReplica(key, replica.Node, replica.Record)
+		}
+	}
 
 	if readCount < 2 {
 		http.Error(
@@ -174,6 +185,42 @@ func (h *Handler) readFromReplica(
 	return record, nil
 }
 
+// Repairs Replica's
+func (h *Handler) repairReplica(key string, node cluster.Node, record model.Record) {
+	url := fmt.Sprintf(
+		"http://localhost:%s/replica/%s",
+		node.PORT,
+		key,
+	)
+
+	body, err := json.Marshal(record)
+	if err != nil {
+		log.Printf("failed to marshal record: %v", err)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPut, url, bytes.NewBuffer(body))
+	if err != nil {
+		log.Printf("failed to create repair request: %v", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("failed to repair replica on node %s: %v", node.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK &&
+		resp.StatusCode != http.StatusCreated &&
+		resp.StatusCode != http.StatusNoContent {
+		log.Printf("replica repair failed on node %s: %s", node.ID, resp.Status)
+	}
+}
+
 // This function handles PUT request
 func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, owner []cluster.Node) {
 	// Read body once so we can  decode and forward it to replicas.
@@ -215,6 +262,7 @@ func (h *Handler) handlePut(w http.ResponseWriter, r *http.Request, key string, 
 	for _, replica := range owner[1:] {
 
 		if !h.manager.IsAlive(replica.ID) {
+
 			continue
 		}
 

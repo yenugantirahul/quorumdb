@@ -43,5 +43,5 @@ datanode*/
 .DS_Store
 Thumbs.db
 
-# Local living project architecture/reference guide
-/scripts/PROJECT_ARCHITECTURE.md
+# Local scripts and living project references
+/scripts/
